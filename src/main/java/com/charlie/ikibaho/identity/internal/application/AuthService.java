@@ -56,10 +56,7 @@ public class AuthService {
                                 String displayName, String organizationName) {
         String normalized = User.normalizeEmail(email);
 
-        String slug = slugify(organizationName);
-        if (organizations.existsBySlug(slug)) {
-            throw new ConflictException("Organization name is already taken");
-        }
+        String slug = requireAvailableSlug(organizationName);
 
         User user = users.findByEmail(normalized).orElse(null);
         if (user == null) {
@@ -72,15 +69,60 @@ public class AuthService {
             throw new InvalidCredentialsException("Invalid credentials");
         }
 
+        return createWorkspaceFor(user, organizationName, slug);
+    }
+
+    /**
+     * Creates a workspace and makes the account its founding admin.
+     *
+     * Package-private so federated sign-up reaches the same code. Two copies of
+     * "make an organization" would drift, and the one that drifted would be the
+     * one nobody tested.
+     */
+    LoginResult createWorkspaceFor(User user, String organizationName, String slug) {
         Organization org = organizations.save(new Organization(organizationName, slug));
         OrganizationMember membership = members.save(
                 OrganizationMember.founder(org.getId(), user.getId()));
 
-        events.publishEvent(new UserRegistered(user.getId(), org.getId(), normalized,
-                displayName, Instant.now()));
+        events.publishEvent(new UserRegistered(user.getId(), org.getId(), user.getEmail(),
+                user.getDisplayName(), Instant.now()));
 
         return LoginResult.signedIn(user.getId(),
                 tokenService.issueForLogin(user, membership),
+                userService.membershipsOf(user.getId()));
+    }
+
+    /** Rejects a taken slug before anything is written. */
+    String requireAvailableSlug(String organizationName) {
+        String slug = slugify(organizationName);
+        if (organizations.existsBySlug(slug)) {
+            throw new ConflictException("Organization name is already taken");
+        }
+        return slug;
+    }
+
+    /**
+     * Turn an authenticated account into a session, resolving the workspace.
+     *
+     * Shared by password and Google sign-in on purpose: which workspace you land
+     * in, and what happens when there are several or none, must not depend on how
+     * you proved who you are.
+     */
+    LoginResult completeLogin(User user, String organizationSlug) {
+        List<OrganizationMember> active = members.activeFor(user.getId());
+        if (active.isEmpty()) {
+            throw new ForbiddenException("This account has no active workspace");
+        }
+
+        OrganizationMember chosen = resolve(active, organizationSlug);
+        if (chosen == null) {
+            // Authenticated but ambiguous. Returning the list here leaks nothing:
+            // they have already proved they own the account.
+            return LoginResult.chooseWorkspace(user.getId(),
+                    userService.membershipsOf(user.getId()));
+        }
+        return LoginResult.signedIn(user.getId(),
+                tokenService.issueForLogin(user, chosen),
                 userService.membershipsOf(user.getId()));
     }
 
@@ -107,21 +149,7 @@ public class AuthService {
             throw new InvalidCredentialsException("Invalid credentials");
         }
 
-        List<OrganizationMember> active = members.activeFor(user.getId());
-        if (active.isEmpty()) {
-            throw new ForbiddenException("This account has no active workspace");
-        }
-
-        OrganizationMember chosen = resolve(active, organizationSlug);
-        if (chosen == null) {
-            // Authenticated but ambiguous. Returning the list here leaks nothing:
-            // they have already proved they own the account.
-            return LoginResult.chooseWorkspace(user.getId(),
-                    userService.membershipsOf(user.getId()));
-        }
-        return LoginResult.signedIn(user.getId(),
-                tokenService.issueForLogin(user, chosen),
-                userService.membershipsOf(user.getId()));
+        return completeLogin(user, organizationSlug);
     }
 
     /** Reissues the token against a different workspace, for an already-signed-in user. */

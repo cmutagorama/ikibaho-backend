@@ -1,18 +1,10 @@
 package com.charlie.ikibaho.identity.internal.web;
 
-import com.charlie.ikibaho.platform.web.ApiVersion;
-
-import com.charlie.ikibaho.identity.internal.application.AuthService;
-import com.charlie.ikibaho.identity.internal.application.InvalidTokenException;
-import com.charlie.ikibaho.identity.internal.application.InvitationService;
-import com.charlie.ikibaho.identity.internal.application.LoginResult;
-import com.charlie.ikibaho.identity.internal.application.TokenPair;
-import com.charlie.ikibaho.identity.internal.web.dto.LoginRequest;
-import com.charlie.ikibaho.identity.internal.web.dto.LoginResponse;
-import com.charlie.ikibaho.identity.internal.web.dto.RefreshRequest;
-import com.charlie.ikibaho.identity.internal.web.dto.RegisterRequest;
-import com.charlie.ikibaho.identity.internal.web.dto.TokenResponse;
+import com.charlie.ikibaho.identity.internal.application.*;
+import com.charlie.ikibaho.identity.internal.domain.IdentityProvider;
+import com.charlie.ikibaho.identity.internal.web.dto.*;
 import com.charlie.ikibaho.platform.security.CurrentUser;
+import com.charlie.ikibaho.platform.web.ApiVersion;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import jakarta.validation.Valid;
@@ -27,15 +19,56 @@ class AuthController {
 
     private final AuthService authService;
     private final InvitationService invitations;
+    private final FederatedIdentityService federated;
     private final CurrentUser currentUser;
     private final RefreshTokenCookies cookies;
 
     AuthController(AuthService authService, InvitationService invitations,
+                   FederatedIdentityService federated,
                    CurrentUser currentUser, RefreshTokenCookies cookies) {
         this.authService = authService;
         this.invitations = invitations;
+        this.federated = federated;
         this.currentUser = currentUser;
         this.cookies = cookies;
+    }
+
+    /**
+     * Public: sign in with Google, optionally founding a workspace at the same
+     * time. The ID token is the credential; no session exists yet.
+     */
+    @PostMapping("/google")
+    LoginResponse google(@Valid @RequestBody GoogleSignInRequest request,
+                         @RequestParam(defaultValue = "false") boolean cookie,
+                         HttpServletResponse response) {
+        return deliver(federated.signIn(request.idToken(), request.organization(),
+                request.organizationName()), cookie, response);
+    }
+
+    /**
+     * Public: accept an invitation by proving control of the invited address.
+     */
+    @PostMapping("/google/accept-invitation")
+    LoginResponse googleAcceptInvitation(@Valid @RequestBody GoogleAcceptRequest request,
+                                         @RequestParam(defaultValue = "false") boolean cookie,
+                                         HttpServletResponse response) {
+        return deliver(federated.acceptInvitation(request.token(), request.idToken()),
+                cookie, response);
+    }
+
+    /**
+     * Links Google to the account already signed in.
+     */
+    @PostMapping("/identities/google")
+    @ResponseStatus(HttpStatus.NO_CONTENT)
+    void linkGoogle(@Valid @RequestBody GoogleLinkRequest request) {
+        federated.linkToCurrentUser(currentUser.requireId(), request.idToken());
+    }
+
+    @DeleteMapping("/identities/google")
+    @ResponseStatus(HttpStatus.NO_CONTENT)
+    void unlinkGoogle() {
+        federated.unlink(currentUser.requireId(), IdentityProvider.GOOGLE);
     }
 
     /**
@@ -51,7 +84,7 @@ class AuthController {
 
     /**
      * Accepting into a second workspace, for somebody who already has an account.
-     *
+     * <p>
      * Authenticated on purpose: the invitation link proves only that an email was
      * received, and the account it attaches to already exists.
      */
@@ -80,7 +113,9 @@ class AuthController {
                 request.organization()), cookie, response);
     }
 
-    /** Reissues the session against another workspace the caller belongs to. */
+    /**
+     * Reissues the session against another workspace the caller belongs to.
+     */
     @PostMapping("/switch-organization")
     LoginResponse switchOrganization(@Valid @RequestBody SwitchRequest request,
                                      @RequestParam(defaultValue = "false") boolean cookie,
@@ -145,6 +180,15 @@ class AuthController {
     }
 
     record SwitchRequest(@NotBlank String organization) {
+    }
+
+    record GoogleSignInRequest(@NotBlank String idToken, String organization, String organizationName) {
+    }
+
+    record GoogleAcceptRequest(@NotBlank String token, @NotBlank String idToken) {
+    }
+
+    record GoogleLinkRequest(@NotBlank String idToken) {
     }
 
     record AcceptSignedInRequest(@NotBlank String token) {
