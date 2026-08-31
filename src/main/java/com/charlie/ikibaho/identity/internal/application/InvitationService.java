@@ -187,7 +187,14 @@ public class InvitationService {
                 .toList();
     }
 
-    private Accepted consume(String rawToken) {
+    /**
+     * Validates and spends an invitation token.
+     *
+     * Package-private rather than private so federated accept goes through the
+     * same expiry, revocation and single-use rules -- a second copy of those is
+     * a second place to get them subtly wrong.
+     */
+    Accepted consume(String rawToken) {
         Instant now = Instant.now();
 
         Invitation invitation = invitations.findByTokenHash(TokenService.hash(rawToken))
@@ -209,7 +216,7 @@ public class InvitationService {
         return new Accepted(user, membership);
     }
 
-    private record Accepted(User user, OrganizationMember membership) {
+    record Accepted(User user, OrganizationMember membership) {
     }
 
     public record MemberView(UUID userId, String email, String displayName, String avatarUrl,

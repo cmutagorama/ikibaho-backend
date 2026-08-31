@@ -141,6 +141,10 @@ class SecurityConfig {
                         .requestMatchers(HttpMethod.POST, ApiVersion.V1 + "/auth/refresh").permitAll()
                         // The invitation token IS the credential; the invitee has no session yet.
                         .requestMatchers(HttpMethod.POST, ApiVersion.V1 + "/auth/accept-invitation").permitAll()
+                        // Same for a Google ID token: it is the credential, and the
+                        // caller has no Ikibaho session to present yet.
+                        .requestMatchers(HttpMethod.POST, ApiVersion.V1 + "/auth/google").permitAll()
+                        .requestMatchers(HttpMethod.POST, ApiVersion.V1 + "/auth/google/accept-invitation").permitAll()
                         // public infrastructure
                         .requestMatchers("/.well-known/**").permitAll()
                         .requestMatchers("/actuator/health/**").permitAll()

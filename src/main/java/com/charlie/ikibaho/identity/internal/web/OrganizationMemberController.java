@@ -1,9 +1,8 @@
 package com.charlie.ikibaho.identity.internal.web;
 
-import com.charlie.ikibaho.platform.web.ApiVersion;
-
 import com.charlie.ikibaho.identity.internal.application.InvitationService;
 import com.charlie.ikibaho.platform.security.CurrentUser;
+import com.charlie.ikibaho.platform.web.ApiVersion;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Email;
 import jakarta.validation.constraints.NotBlank;

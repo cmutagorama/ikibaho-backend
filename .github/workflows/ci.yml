@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+  # Lets you re-run a build by hand without an empty commit.
+  workflow_dispatch:
+
+# A superseded push has nothing useful left to say, and the suite spins up real
+# Postgres containers -- so cancel rather than queue.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and test
+    runs-on: ubuntu-latest
+    # The suite starts Testcontainers Postgres per test class; ~3 minutes locally.
+    # The ceiling is here to kill a hang, not to pace a normal run.
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: maven
+
+      # keys/ is gitignored, so a clone has none -- and every @SpringBootTest
+      # loads SecurityConfig, which reads both files. Without this the whole
+      # suite fails at context startup rather than on anything real.
+      #
+      # Throwaway, per-run, never leaves the runner. The production key belongs
+      # in a secret manager, not in a repository or a workflow.
+      - name: Generate throwaway JWT signing keys
+        run: |
+          mkdir -p keys
+          openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out keys/app.key
+          openssl rsa -in keys/app.key -pubout -out keys/app.pub
+
+      # No `docker compose up`: the tests use Testcontainers, which starts its
+      # own Postgres and tears it down. compose.yml is for local development.
+      # Docker is preinstalled on ubuntu-latest.
+      - name: Test
+        run: ./mvnw --batch-mode --no-transfer-progress verify
+
+      # Surefire's XML is the only way to see which assertion failed once the
+      # log has scrolled; upload it whether or not the build passed.
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: surefire-reports
+          path: target/surefire-reports/
+          retention-days: 7
+          if-no-files-found: ignore
+
+      # ModularityTests regenerates these on every run, so they cannot drift from
+      # the code the way a checked-in diagram would.
+      - name: Upload module diagrams
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: module-docs
+          path: target/spring-modulith-docs/
+          retention-days: 7
+          if-no-files-found: ignore
