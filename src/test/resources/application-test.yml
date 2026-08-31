@@ -1,0 +1,6 @@
+spring:
+  docker:
+    compose: false  # tests use Testcontainers, not compose.yaml
+  jpa:
+    hibernate:
+      ddl-auto: validate
