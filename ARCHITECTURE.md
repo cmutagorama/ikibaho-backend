@@ -2,8 +2,8 @@
 
 A JIRA-style project management tool. Spring Boot 4.1, Java 21, PostgreSQL.
 
-> **Status: the nine planned phases, plus a tenth.** Migrations `V1`–`V13`,
-> 125 tests green, `ModularityTests` enforcing boundaries in CI.
+> **Status: the nine planned phases, plus two more.** Migrations `V1`–`V14`,
+> 144 tests green, `ModularityTests` enforcing boundaries in CI.
 >
 > Sections 1–4 are the original design rationale and still hold. Section 5 is the
 > structure as it actually stands, §6 records what each phase turned out to
@@ -273,6 +273,8 @@ spring-boot-starter-oauth2-resource-server
 
 **Do not** use `spring-boot-starter-oauth2-client` or an external IdP for v1 — you'd learn Auth0's console, not Spring Security. And don't hand-roll a `OncePerRequestFilter` that parses JWTs with jjwt either; you'd reimplement (badly) what the resource server already does.
 
+*That advice held, including once Google sign-in arrived in phase 11.* `spring-boot-starter-oauth2-client` is still not a dependency. `oauth2Login()` is a browser redirect flow that establishes an HTTP **session**, which fights the `STATELESS` policy this whole API rests on. Instead the SPA obtains a Google ID token client-side and POSTs it; the server verifies it and issues its own tokens, so Google authenticates and Ikibaho still owns the session. Verifying it needs no new dependency either — `NimbusJwtDecoder` comes with the resource-server starter.
+
 The sweet spot: **you issue the tokens, Spring Security validates them.**
 
 - Generate an RSA (or EC P-256) keypair. Publish the public key at `/.well-known/jwks.json`.
@@ -473,11 +475,13 @@ src/main/java/com/charlie/ikibaho/
 │   ├── events/UserRegistered.java + package-info.java   # @NamedInterface("events")
 │   └── internal/                    # ── PRIVATE ──
 │       ├── domain/User (the account), Organization, OrganizationMember,
-│       │         MemberRole, MembershipStatus, RefreshToken, Invitation, UserGroup
+│       │         MemberRole, MembershipStatus, UserIdentity, IdentityProvider,
+│       │         RefreshToken, Invitation, UserGroup
+│       ├── federation/GoogleIdentityVerifier, GoogleProperties   # Google-specific only
 │       ├── persistence/UserRepository, OrganizationMemberRepository,
-│       │              OrganizationRepository, UserGroupRepository, …
+│       │              OrganizationRepository, UserIdentityRepository, …
 │       ├── application/AuthService, TokenService, InvitationService,
-│       │              UserServiceImpl, LoginResult
+│       │              FederatedIdentityService, UserServiceImpl, LoginResult
 │       └── web/AuthController, UserController, OrganizationMemberController, dto/
 │
 ├── project/
@@ -565,13 +569,16 @@ src/main/resources/db/migration/
 ├── V5__soft_delete_timestamp.sql V11__search.sql
 ├── V6__workflow.sql              V12__integration.sql
 │                                 V13__global_accounts.sql
+│                                 V14__federated_identity.sql
 
 src/test/java/com/charlie/ikibaho/
 ├── ModularityTests.java             # ApplicationModules.verify() — the boundary guard
 ├── AbstractIntegrationTest.java     # Testcontainers Postgres, truncate between tests
 ├── support/TestFixtures.java, InMemoryStorage.java
 ├── events/EventPipelineIntegrationTest.java
-├── identity/MembershipIntegrationTest, GlobalAccountMigrationTest
+├── identity/MembershipIntegrationTest, GlobalAccountMigrationTest,
+│           GoogleSignInIntegrationTest, GoogleAutoLinkDisabledTest,
+│           internal/federation/{GoogleIdentityVerifierTest, StubGoogleVerifier}
 ├── issue/IssueServiceIntegrationTest, AttachmentIntegrationTest, rank/LexoRankTest
 ├── board/BoardIntegrationTest.java
 ├── search/JqlParserTest, JqlCompilerTest, SearchIntegrationTest
@@ -604,8 +611,9 @@ Each phase ended with something you could hit with `curl`. That held, and it was
 | 8 | **Search** — Postgres FTS, JQL parser, saved filters | `V11` | ✅ |
 | 9 | **Integration** — attachments, webhooks with HMAC + retry, digests, SSE | `V12` | ✅ |
 | 10 | **Global accounts** — one account per person, membership per organization | `V13` | ✅ |
+| 11 | **Google sign-in** — ID token verification, account linking, federated invitations | `V14` | ✅ |
 
-Phase 10 was not in the original plan. It came out of a question the plan could not answer — "can somebody sign up with their Gmail address and join an existing workspace?" — which turned out to be blocked by an inconsistency nobody had noticed: the schema said `UNIQUE (organization_id, email)` while every code path assumed email was globally unique. See §8.
+Phases 10 and 11 were not in the original plan. They came out of a question the plan could not answer — "can somebody sign up with their Gmail address and join an existing workspace?" — which turned out to be blocked by an inconsistency nobody had noticed: the schema said `UNIQUE (organization_id, email)` while every code path assumed email was globally unique. See §8.
 
 Doing permissions at phase 3, before issues, was the single best sequencing decision. Every service written afterwards takes an `actorId` and checks a permission as its first statement, because there was never a version of the code where it didn't.
 
@@ -618,9 +626,9 @@ Doing permissions at phase 3, before issues, was the single best sequencing deci
 - **Idempotency keys on `POST /issues`** (§4). Double-clicking Create still makes two tickets.
 - **Rank rebalancing.** `LexoRank.isDegenerate` flags ranks that have grown past 8 characters; nothing acts on it yet.
 - **Notification preferences.** §4 says per-user, per-project "from day one"; there is one global digest and no opt-out.
-- **Virtual threads.** `spring.threads.virtual.enabled` is not set.
-- **Federated sign-in.** `V7` made `password_hash` nullable for it and phase 10 made the account global, which is the hard prerequisite — but there is no `user_identity` table and no OAuth client. Note that `ck_app_user_authenticatable` currently *rejects* an active account with no password, exactly as its own comment warns; that constraint has to change when SSO lands.
-- **Email verification and password reset.** §3 lists both as needed. Neither exists.
+- **Email verification and password reset.** §3 lists both as needed. Neither exists — which matters more since phase 11, because auto-linking a Google identity is justified by being *no weaker than a password reset*, and there is currently no password reset to compare it to.
+- **A `nonce` on the Google flow.** The ID token is accepted as a bearer credential for its lifetime (Google's default is an hour). Audience binding, expiry and HTTPS are the mitigations; Google Identity Services supports a server-generated nonce if this ever guards anything more sensitive.
+- **Providers beyond Google.** `IdentityProvider` is an enum of one and `user_identity` has a CHECK to match, so adding one is a migration, not a refactor.
 
 ---
 
@@ -686,6 +694,22 @@ Ikibaho took the Jira Cloud model in phase 10. The consequences worth knowing:
 - **Accepting an invitation split in two.** A *new* account sets its first password from the link. An account that already has one must be **signed in** to accept — a link proves only that an email was received, and letting it set a password on an established account turns a forwarded invitation into an account takeover.
 - **The abstraction was already right before the schema was.** `UserService.userExistsInOrganization(userId, orgId)` is a membership predicate, not a field read, so its only caller — `ProjectServiceImpl` — did not change at all. Only three sites read `User.getOrganizationId()`.
 
+### Federated sign-in, and what it turns on
+
+Phase 11 was small precisely because phase 10 had already happened: one Google identity maps to one global account, which then holds any number of workspaces. Under per-org users the same person would have needed a Google account per workspace, which is not a thing anyone has.
+
+Four decisions carry the weight:
+
+**Key on `sub`, never email.** Google's subject is stable; the address on an account can change and addresses get reassigned between people. Keying on email would eventually hand a recycled address the previous owner's account. `user_identity` stores the email too, for audit only.
+
+**Audience validation is the whole feature.** Every Google application's ID tokens are signed by the same keys, so verifying the signature proves the token came from Google and *nothing about who it was issued to*. Without `aud == our client id`, a token minted for any other Google app — including one an attacker registers in five minutes — authenticates here. There is deliberately no default client id: blank disables the feature rather than accepting everything.
+
+**Auto-linking is justified by comparison, not by convenience.** Attaching a verified Google address to an existing password account is exactly as strong as a password reset, because both trust control of the mailbox. That argument holds for Google and would need re-examining for a provider whose `email_verified` means less — which is why the rule sits in `FederatedIdentityService` with the reasoning attached, and behind a config switch.
+
+**Google-accepted invitations are stronger than password ones.** The password path trusts whoever holds the link. The Google path additionally requires the authenticated address to equal the invited one, so a forwarded invitation is useless to the wrong person.
+
+The split of code follows the split of concerns: `internal/federation` holds only what is Google-specific — verifying a token, reading its claims — while `FederatedIdentityService` sits beside `AuthService` and reuses its `completeLogin` and `createWorkspaceFor`. Google changes how somebody proves who they are; it must not change what happens afterwards, and sharing the code is the only way to guarantee that.
+
 ### Boundary decisions the gate forced
 
 Running `ApplicationModules.verify()` for the first time — at phase 6, against five phases of existing code — found three real defects, not nitpicks:
@@ -719,6 +743,12 @@ Two structural declarations make the rest work:
 
 The general rule: **a migration that transforms existing rows needs a test that gives it existing rows.** Schema-only migrations do not, because the schema is asserted by `ddl-auto=validate` on every other test.
 
+**A CHECK constraint is evaluated as each row is written, not at the end of the method.** `FederatedIdentityService` created a passwordless account with `users.save(...)` and *then* called `activateWithFederatedIdentity()` to set the flag `ck_app_user_authenticatable` requires. The INSERT flushes first, so every Google sign-up died on the constraint. Reads perfectly sensibly, fails 100% of the time — and it was written *after* the same trap had been listed as a known hazard, which is a decent argument for testing hazards rather than documenting them.
+
+**A test double for a class, not an interface, has to live in that class's package.** `GoogleIdentityVerifier`'s constructor is package-private on purpose — it publishes no `JwtDecoder` bean, so it cannot be assembled from outside. `StubGoogleVerifier` therefore sits in `internal.federation`, same as `RecordingWebhookSender` sits in `internal.delivery`. Both are the price of not widening production visibility for a test's convenience.
+
+**Config that flips behaviour wants a second context, not a setter.** `allow-auto-link` is a field on a `record` bound from configuration. Testing it through `@TestPropertySource` in its own test class exercises the binding an operator would actually use; a mutable holder would test a thing that does not exist in production.
+
 ### Known sharp edges
 
 - **The search indexer has no per-issue ordering.** Two events for one issue can interleave across the pool and a stale read can win, leaving the index behind until the next event. The fix is a guard on the upsert: `WHERE issue_search_index.updated_at <= EXCLUDED.updated_at` — `<=` not `<`, because `IssueCommented` does not change `issue.updated_at`.
@@ -727,4 +757,5 @@ The general rule: **a migration that transforms existing rows needs a test that 
 - **`event_publication` sits on the write path of every domain change**, and now has four consumers (activity, notification, search, integration). Publications that never complete accumulate there. `spring-modulith-actuator` is exposed at `/actuator/modulith` for exactly this; eventually it wants `completion-mode=archive`.
 - **`@Scheduled` jobs run during integration tests.** The webhook tests call `drainNow()` directly rather than waiting for the scheduler, since ShedLock's `lockAtLeastFor` correctly suppresses repeat runs and a test that waits for a scheduler is a test that waits.
 - **Deactivated members keep their `project_role_actor` rows.** Inert — permission checks go through `userExistsInOrganization`, which requires an ACTIVE membership — but they still appear in project role admin screens. Wants a sweep.
-- **The login contract changed in phase 10 and `ikibaho-ui` has not caught up.** `POST /auth/login` now returns `{userId, tokens, organizations}` with a **nullable** `tokens`, and `POST /auth/switch-organization` is new. The UI needs a workspace picker and switcher before it can authenticate against this.
+- **The login contract changed in phase 10 and `ikibaho-ui` has not caught up.** `POST /auth/login` now returns `{userId, tokens, organizations}` with a **nullable** `tokens`, and `POST /auth/switch-organization` is new. Phase 11 adds `POST /auth/google`, `/auth/google/accept-invitation` and link/unlink under `/auth/identities/google`. The UI needs a workspace picker and switcher before it can authenticate at all.
+- **The Google ID token is accepted as a bearer credential** for its lifetime — anyone who captures one can replay it until it expires. Audience binding, short expiry and HTTPS are the mitigations in place; a server-generated `nonce` is the next step if it ever guards more than this.
